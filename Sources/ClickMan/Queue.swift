@@ -83,7 +83,7 @@ final class Queue: Sendable {
     }
 }
 
-/// An event in the queue: its place and its JSON.
+/// An event or a link in the queue: its place and its JSON.
 struct QueuedEvent: Equatable, Sendable {
     let seq: Int64
     let body: String
@@ -123,6 +123,15 @@ struct QueueTransaction {
 
     func setExternalId(_ externalId: String) throws {
         try db.execute(sql: "UPDATE identity SET external_id = ? WHERE id = 1", arguments: [externalId])
+    }
+
+    /// Later events are about a new visitor, `anon:<UUIDv4>`, unless they are
+    /// about a visitor or an account already.
+    func identifyInstallation() throws {
+        try db.execute(
+            sql: "UPDATE identity SET external_id = ? WHERE id = 1 AND external_id = '*'",
+            arguments: [Identity.visitorPrefix + UUID().uuidString.lowercased()]
+        )
     }
 
     func setTraits(_ traits: [String: JSONValue]) throws {

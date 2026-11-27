@@ -9,22 +9,23 @@ enum DrainScope: Sendable {
     case everything
 }
 
-/// Sends the waiting events in batches, one in flight at a time, and backs off
-/// after a failed send (docs/PROTOCOL.md, Sending). The failures are counted in
+/// Sends the waiting events in batches and the links between them alone, one
+/// request in flight at a time, and backs off after a failed send
+/// (docs/PROTOCOL.md, Sending; Visitors and links). The failures are counted in
 /// memory, so a restarted client sends at once.
 actor Sender {
     /// How long an event may wait unsent before it is deleted.
     static let maxAge: TimeInterval = 30 * 24 * 60 * 60
 
-    /// Whether the next batch may go out.
+    /// Whether the next take may go out.
     private enum Pace {
-        /// The last batch left the queue.
+        /// The last take left the queue.
         case open
-        /// `failures` batches in a row stayed; the next attempt waits until `nextAttemptAt`.
+        /// `failures` takes in a row stayed; the next attempt waits until `nextAttemptAt`.
         case backingOff(failures: Int, nextAttemptAt: Date)
     }
 
-    /// What the server said to a batch; status 0 when nothing came back.
+    /// What the server said to a take; status 0 when nothing came back.
     private struct Answer {
         let status: Int
         let retryAfter: TimeInterval?
@@ -32,7 +33,8 @@ actor Sender {
     }
 
     private let queue: Queue
-    private let request: URLRequest
+    private let batchRequest: URLRequest
+    private let linkRequest: URLRequest
     private let session: URLSession
     private let flushAt: Int
     private let flushInterval: Duration
@@ -43,7 +45,8 @@ actor Sender {
 
     init(queue: Queue, configuration: ClickMan.Configuration, clock: @escaping @Sendable () -> Date, logger: Logger) throws {
         self.queue = queue
-        self.request = try configuration.request()
+        self.batchRequest = try configuration.request(.batch)
+        self.linkRequest = try configuration.request(.identify)
         self.session = configuration.session
         self.flushAt = configuration.flushAt
         self.flushInterval = configuration.flushInterval
@@ -51,21 +54,21 @@ actor Sender {
         self.logger = logger
     }
 
-    /// Sends batches until none is due or a send fails, after the drains asked for before it.
+    /// Sends takes until none is due or a send fails, after the drains asked for before it.
     func drain(_ scope: DrainScope) async {
         let previous = drains
         let current = Task {
             await previous?.value
-            await sendBatches(scope)
+            await sendTakes(scope)
         }
         drains = current
         await current.value
     }
 
-    private func sendBatches(_ scope: DrainScope) async {
+    private func sendTakes(_ scope: DrainScope) async {
         do {
-            while let batch = try dueBatch(scope) {
-                guard try await send(batch) != .retry else {
+            while let take = try dueTake(scope) {
+                guard try await send(take) != .retry else {
                     return
                 }
             }
@@ -74,14 +77,14 @@ actor Sender {
         }
     }
 
-    /// The batch to send now: none while a retry waits, while nothing is due, or when nothing waits.
-    private func dueBatch(_ scope: DrainScope) throws -> Batch? {
+    /// The take to send now: none while a retry waits, while nothing is due, or when nothing waits.
+    private func dueTake(_ scope: DrainScope) throws -> Take? {
         let now = clock()
         try queue.purge(createdBefore: now.addingTimeInterval(-Self.maxAge))
         guard mayAttempt(at: now), try isDue(scope, at: now) else {
             return nil
         }
-        return Batch(taking: try queue.oldest(Batch.maxEvents))
+        return Take(taking: try queue.oldest(Batch.maxEvents))
     }
 
     private func mayAttempt(at date: Date) -> Bool {
@@ -103,13 +106,28 @@ actor Sender {
         }
     }
 
-    private func send(_ batch: Batch) async throws -> Outcome {
-        var request = self.request
-        request.httpBody = try Gzip.compress(batch.payload(sentAt: clock()))
-        let answer = await post(request)
-        let outcome = Outcome(status: answer.status)
-        try settle(batch, outcome: outcome, answer: answer)
-        return outcome
+    private func send(_ take: Take) async throws -> Outcome {
+        switch take {
+        case .batch(let batch):
+            var request = batchRequest
+            request.httpBody = try Gzip.compress(batch.payload(sentAt: clock()))
+            let answer = await post(request)
+            let outcome = Outcome(status: answer.status)
+            try settle(take, outcome: outcome, answer: answer, sent: "\(batch.bodies.count) events")
+            return outcome
+        case .link(let seq, let body):
+            guard let link = Link(body: body) else {
+                logger.error("ClickMan dropped a link it cannot send: \(body, privacy: .private)")
+                try queue.delete(through: seq)
+                return .refused
+            }
+            var request = linkRequest
+            request.httpBody = try link.payload()
+            let answer = await post(request)
+            let outcome = Outcome(linkStatus: answer.status)
+            try settle(take, outcome: outcome, answer: answer, sent: "a link")
+            return outcome
+        }
     }
 
     private func post(_ request: URLRequest) async -> Answer {
@@ -125,28 +143,29 @@ actor Sender {
         }
     }
 
-    private func settle(_ batch: Batch, outcome: Outcome, answer: Answer) throws {
+    /// `sent` names what the take sent for the log, e.g. `3 events`.
+    private func settle(_ take: Take, outcome: Outcome, answer: Answer, sent: String) throws {
         switch outcome {
         case .delivered:
-            try remove(batch)
+            try remove(take)
         case .refused:
-            logger.error("ClickMan dropped \(batch.bodies.count) events the server refused with \(answer.status): \(answer.detail, privacy: .public)")
-            try remove(batch)
+            logger.error("ClickMan dropped \(sent, privacy: .public) the server refused with \(answer.status): \(answer.detail, privacy: .public)")
+            try remove(take)
         case .retry:
-            backOff(after: answer)
+            backOff(after: answer, sent: sent)
         }
     }
 
-    private func remove(_ batch: Batch) throws {
-        try queue.delete(through: batch.lastSeq)
+    private func remove(_ take: Take) throws {
+        try queue.delete(through: take.lastSeq)
         pace = .open
     }
 
-    private func backOff(after answer: Answer) {
+    private func backOff(after answer: Answer, sent: String) {
         let failures = min(failures, Int.max - 1) + 1
         let delay = RetryDelay.seconds(failures: failures, retryAfter: answer.retryAfter)
         pace = .backingOff(failures: failures, nextAttemptAt: clock().addingTimeInterval(delay))
-        logger.error("ClickMan will retry a batch in \(delay.rounded(.up))s, the answer was \(answer.status): \(answer.detail, privacy: .public)")
+        logger.error("ClickMan will retry \(sent, privacy: .public) in \(delay.rounded(.up))s, the answer was \(answer.status): \(answer.detail, privacy: .public)")
     }
 
     private var failures: Int {

@@ -46,6 +46,8 @@ enum Worker {
         switch command {
         case .identify(let externalId):
             clickMan.identify(externalId)
+        case .identifyInstallation:
+            clickMan.identifyInstallation()
         case .traits(let traits):
             clickMan.setTraits(traits.mapValues { Optional($0) })
         case .track(let event, let properties):

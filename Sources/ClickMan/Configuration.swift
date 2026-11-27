@@ -44,21 +44,32 @@ extension ClickMan {
             }
         }
 
-        func request() throws -> URLRequest {
+        /// The routes a client posts to below the endpoint.
+        enum Route: String {
+            /// Gzipped batches of events.
+            case batch = "/v1/batch"
+            /// A visitor's link to an account, uncompressed.
+            case identify = "/v1/identify"
+        }
+
+        /// The POST of `route` with the write key; a batch is gzipped.
+        func request(_ route: Route = .batch) throws -> URLRequest {
             try validate()
             guard var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: true) else {
                 throw ClickManError.configuration("the endpoint could not be parsed")
             }
             components.percentEncodedPath = components.percentEncodedPath
-                .replacingOccurrences(of: #"/+$"#, with: "", options: .regularExpression) + "/v1/batch"
+                .replacingOccurrences(of: #"/+$"#, with: "", options: .regularExpression) + route.rawValue
             guard let url = components.url else {
-                throw ClickManError.configuration("the batch endpoint could not be constructed")
+                throw ClickManError.configuration("the \(route) endpoint could not be constructed")
             }
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
             request.setValue("Bearer \(writeKey)", forHTTPHeaderField: "Authorization")
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.setValue("gzip", forHTTPHeaderField: "Content-Encoding")
+            if route == .batch {
+                request.setValue("gzip", forHTTPHeaderField: "Content-Encoding")
+            }
             return request
         }
     }

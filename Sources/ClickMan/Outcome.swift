@@ -15,4 +15,10 @@ enum Outcome: String, Sendable {
         default: self = .retry
         }
     }
+
+    /// What the answer to a link does to it: as to a batch, except that 422,
+    /// the visitor already linked to another account, refuses it (identity.json).
+    init(linkStatus status: Int) {
+        self = status == 422 ? .refused : Outcome(status: status)
+    }
 }

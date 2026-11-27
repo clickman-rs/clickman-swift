@@ -21,7 +21,7 @@ public final class ClickMan: @unchecked Sendable {
 
     // Every stored property is set once in init and never mutated: the unchecked Sendable rests on it.
     private let queue: Queue
-    private let tracker: Tracker
+    let tracker: Tracker
     private let sender: Sender
     private let poller: Task<Void, Never>
     private let network: NetworkReturn?
@@ -63,8 +63,21 @@ public final class ClickMan: @unchecked Sendable {
     }
 
     /// Makes the host's user id the actor of every event tracked from now on.
+    /// While events are tracked as a visitor (see `identifyInstallation()`),
+    /// the visitor is linked to the account: the link waits in the queue
+    /// between the visitor's events and the account's and is sent alone. A
+    /// visitor id (`anon:…`) is refused and logged, never thrown.
     public func identify(_ externalId: String) {
         tracker.identify(externalId)
+    }
+
+    /// Makes an anonymous client track as a new visitor, `anon:<UUID>`, kept
+    /// across launches: the visitor counts in visitor numbers, unlike `*`, and
+    /// is linked to the account `identify` names next. While events are
+    /// tracked as a visitor or an account this does nothing, so it is safe to
+    /// call at every launch; after `reset()` it starts another visitor.
+    public func identifyInstallation() {
+        tracker.identifyInstallation()
     }
 
     /// Merges traits of the actor into `context.traits` of every event tracked
@@ -82,7 +95,8 @@ public final class ClickMan: @unchecked Sendable {
     }
 
     /// Makes events tracked from now on anonymous and forgets the traits, e.g.
-    /// after signing out.
+    /// after signing out. Call `identifyInstallation()` after it to track as a
+    /// new visitor: a visitor never links to two accounts.
     public func reset() {
         tracker.reset()
     }
@@ -93,7 +107,7 @@ public final class ClickMan: @unchecked Sendable {
         await sender.drain(.everything)
     }
 
-    /// Events on the device, in flight or waiting.
+    /// Events on the device, in flight or waiting, counting the links between them.
     public var pendingEvents: Int {
         do {
             return try queue.count()

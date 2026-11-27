@@ -3,6 +3,7 @@ import Foundation
 /// One line of the worker protocol, read from stdin.
 enum Command {
     case identify(externalId: String)
+    case identifyInstallation
     case traits([String: Any])
     case track(event: String, properties: [String: Any])
     case reset
@@ -18,6 +19,7 @@ enum Command {
         let request = try Self.object(line)
         switch request["command"] as? String {
         case "identify": self = .identify(externalId: try Self.field("externalId", of: request))
+        case "identifyInstallation": self = .identifyInstallation
         case "traits": self = .traits(try Self.field("traits", of: request))
         case "track": self = .track(event: try Self.field("event", of: request), properties: try Self.properties(of: request))
         case "reset": self = .reset
